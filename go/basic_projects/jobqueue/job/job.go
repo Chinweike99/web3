@@ -1,14 +1,26 @@
 package job
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	"time"
+)
 
 type Job struct {
-	ID int
+	ID   int
 	Name string
 }
 
-func (j Job) Execute(){
-	fmt.Printf("Executing job %d: %s\n", j.ID, j.Name)
+func (j Job) Execute(ctx context.Context) error {
+	if j.Name == "panic" {
+		panic("job panicked intentionally")
+	}
+
+	select {
+	case <-time.After(3 * time.Second):
+		fmt.Printf("Job %d completed: %s\n", j.ID, j.Name)
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
-
-
