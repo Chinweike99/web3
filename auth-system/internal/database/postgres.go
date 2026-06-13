@@ -11,7 +11,6 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-
 var DB *gorm.DB
 
 func ConnectDB() {
