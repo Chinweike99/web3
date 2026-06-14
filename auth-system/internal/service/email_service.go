@@ -66,7 +66,7 @@ func (s *EmailService) SendVerificationEmail(user *models.User) error {
 	body := fmt.Sprintf(`
 		<html>
 		<body>
-			 <h2>Welcome to Our Platform!</h2>
+			 <h2>Welcome to My Learning golang journey!</h2>
             <p>Please verify your email address by clicking the link below:</p>
             <p><a href="%s">Verify Email</a></p>
             <p>This link will expire in 24 hours.</p>
@@ -85,8 +85,8 @@ func (s *EmailService) SendVerificationEmail(user *models.User) error {
 func (s *EmailService) SendWecomeEmail(user *models.User) error {
 	m := gomail.NewMessage()
 	m.SetHeader("From", config.AppConfig.SMTPFrom)
-    m.SetHeader("To", user.Email)
-    m.SetHeader("Subject", "Welcome to Our Platform!")
+	m.SetHeader("To", user.Email)
+	m.SetHeader("Subject", "Welcome to My Learning golang journey!")
 
 	body := fmt.Sprintf(`
         <html>
@@ -99,5 +99,63 @@ func (s *EmailService) SendWecomeEmail(user *models.User) error {
     `, user.FirstName)
 
 	m.SetBody("text/html", body)
+	return s.dialer.DialAndSend(m)
+}
+
+func (s *EmailService) SendPasswordResetEmail(user *models.User, token string) error {
+	m := gomail.NewMessage()
+	m.SetHeader("From", config.AppConfig.SMTPFrom)
+	m.SetHeader("To", user.Email)
+	m.SetHeader("Subject", "Password Reset Request")
+
+	resetURL := fmt.Sprintf("%s/reset-password?token=%s",
+		config.AppConfig.AppURL, token)
+
+	body := fmt.Sprintf(`
+        <html>
+        <body>
+            <h2>Password Reset Request</h2>
+            <p>We received a request to reset your password. Click the link below to create a new password:</p>
+            <p><a href="%s">Reset Password</a></p>
+            <p>This link will expire in 1 hour.</p>
+            <p>If you didn't request this, please ignore this email.</p>
+            <hr>
+            <p>For security reasons, never share this link with anyone.</p>
+        </body>
+        </html>
+    `, resetURL)
+
+	m.SetBody("text/html", body)
+
+	if err := s.dialer.DialAndSend(m); err != nil {
+		log.Printf("Failed to send password reset email: %v", err)
+		return err
+	}
+
+	return nil
+}
+
+func (s *EmailService) SendPasswordChangedEmail(user *models.User) error {
+	m := gomail.NewMessage()
+	m.SetHeader("From", config.AppConfig.SMTPFrom)
+	m.SetHeader("To", user.Email)
+	m.SetHeader("Subject", "Your Password Has Been Changed")
+
+	body := fmt.Sprintf(`
+        <html>
+        <body>
+            <h2>Password Changed Successfully</h2>
+            <p>Hello %s,</p>
+            <p>Your password has been successfully changed.</p>
+            <p>If you did not perform this action, please contact our support team immediately.</p>
+            <br>
+            <p>Best regards,</p>
+            <p>Security Team</p>
+        </body>
+        </html>
+    `, user.FirstName)
+
+	m.SetBody("text/html", body)
+
 	return s.dialer.DialAndSend(m)
 }

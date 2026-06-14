@@ -4,6 +4,8 @@ import (
 	"auth-system/internal/config"
 	"auth-system/internal/models"
 	"auth-system/internal/repository"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log"
 	"time"
@@ -16,17 +18,24 @@ type AuthService struct {
 	userRepo     *repository.UserRepository
 	tokenService *TokenService
 	emailService *EmailService
+	rateLimitService *RateLimitService
 }
 
-func NewAuthService(userRepo *repository.UserRepository, tokenService *TokenService, emailService *EmailService) *AuthService {
+func NewAuthService(userRepo *repository.UserRepository, tokenService *TokenService, emailService *EmailService,  rateLimitService *RateLimitService,) *AuthService {
 	return &AuthService{
 		userRepo:     userRepo,
 		tokenService: tokenService,
 		emailService: emailService,
+		rateLimitService: rateLimitService,
 	}
 }
 
-func (s *AuthService) Register(req *models.RegisterRequest) (*models.User, error) {
+func (s *AuthService) Register(req *models.RegisterRequest, ip string) (*models.User, error) {
+	// Track registration attempt
+    defer func() {
+        s.rateLimitService.RecordAttempt(ip, req.Email, true)
+    }()
+	
 	existingUser, err := s.userRepo.FindByEmail(req.Email)
 	if err != nil {
 		return nil, err
@@ -61,7 +70,14 @@ func (s *AuthService) Register(req *models.RegisterRequest) (*models.User, error
 	return user, nil
 }
 
-func (s *AuthService) Login(req *models.LoginRequest) (*models.User, *models.TokenResponse, error) {
+func (s *AuthService) Login(req *models.LoginRequest, ip string) (*models.User, *models.TokenResponse, error) {
+	
+	// Track attempt
+    success := false
+    defer func() {
+        s.rateLimitService.RecordAttempt(ip, req.Email, success)
+    }()
+	
 	user, err := s.userRepo.FindByEmail(req.Email)
 	if err != nil {
 		return nil, nil, err
@@ -73,7 +89,7 @@ func (s *AuthService) Login(req *models.LoginRequest) (*models.User, *models.Tok
 		return nil, nil, errors.New("Account is inactive")
 	}
 
-	if !user.EmailVerified{
+	if !user.EmailVerified {
 		return nil, nil, errors.New("please verify your email address before logging in")
 	}
 
@@ -81,6 +97,8 @@ func (s *AuthService) Login(req *models.LoginRequest) (*models.User, *models.Tok
 	if err != nil {
 		return nil, nil, errors.New("Invalid password")
 	}
+
+	success = true
 
 	// Generate tokens
 	accessToken, err := s.tokenService.GenerateAccessToken(user)
@@ -130,7 +148,6 @@ func (s *AuthService) Logout(userID uuid.UUID) error {
 	return s.userRepo.RevokeAllUserRefreshTokens(userID)
 }
 
-
 func (s *AuthService) VerifyEmail(token string) error {
 	verification, err := s.userRepo.FindEmailVerificationByToken(token)
 	if err != nil {
@@ -138,10 +155,10 @@ func (s *AuthService) VerifyEmail(token string) error {
 	}
 
 	if verification == nil {
-		return errors.New("Invalis or expired token")
+		return errors.New("Invalid or expired token")
 	}
 
-	if verification.ExpiresAt.Before(time.Now()){
+	if verification.ExpiresAt.Before(time.Now()) {
 		return errors.New("Verification token expired")
 	}
 
@@ -162,10 +179,10 @@ func (s *AuthService) VerifyEmail(token string) error {
 	return nil
 }
 
-func (s *AuthService) ResendVerificationEmail (email string) error {
+func (s *AuthService) ResendVerificationEmail(email string) error {
 	user, err := s.userRepo.FindByEmail(email)
 	if err != nil {
-		return  err
+		return err
 	}
 	if user == nil {
 		return errors.New("User not found")
@@ -174,4 +191,114 @@ func (s *AuthService) ResendVerificationEmail (email string) error {
 		return errors.New("email already verified")
 	}
 	return s.emailService.SendVerificationEmail(user)
+}
+
+func (s *AuthService) ForgotPassword(email string) error {
+	user, err := s.userRepo.FindByEmail(email)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return errors.New("User not found")
+	}
+
+	token, err := s.generatePasswordResetToken()
+	if err != nil {
+		return err
+	}
+
+	passwordReset := &models.PasswordReset{
+		UserID:    user.ID,
+		Token:     token,
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+	}
+	if err := s.userRepo.CreatePasswordReset(passwordReset); err != nil {
+		return err
+	}
+	// Send reset email
+	go s.emailService.SendPasswordResetEmail(user, token)
+	return nil
+}
+
+func (s *AuthService) ResetPassword(req *models.ResetPasswordRequest) error {
+	// Validate passwords match
+	if req.NewPassword != req.ConfirmPassword {
+		return errors.New("passwords do not match")
+	}
+	reset, err := s.userRepo.FindPasswordResetByToken(req.Token)
+	if err != nil {
+		return err
+	}
+	if reset == nil {
+		return errors.New("invalid or expired reset token")
+	}
+
+	// Check if token is expired
+	if reset.ExpiresAt.Before(time.Now()) {
+		return errors.New("reset token has expired")
+	}
+
+	// Hash new password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+
+	// Update password
+	if err := s.userRepo.UpdatePassword(reset.UserID, string(hashedPassword)); err != nil {
+		return err
+	}
+
+	// Mark reset token as used
+	if err := s.userRepo.MarkPasswordResetUsed(reset.ID); err != nil {
+		return err
+	}
+	if err := s.userRepo.RevokeAllUserRefreshTokens(reset.UserID); err != nil {
+		log.Printf("Failed to revoke refresh tokens: %v", err)
+	}
+	user, err := s.userRepo.FindByID(reset.UserID)
+	if err == nil && user != nil {
+		go s.emailService.SendPasswordChangedEmail(user)
+	}
+
+	return nil
+}
+
+func (s *AuthService) ChangePassword(userID uuid.UUID, req *models.ChangePasswordRequest) error {
+	if req.NewPassword != req.ConfirmPassword {
+		return errors.New("passwords do not match")
+	}
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return errors.New("user not found")
+	}
+	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.CurrentPassword))
+	if err != nil {
+		return errors.New("current password is incorrect")
+	}
+	// Hash new password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+
+	if err := s.userRepo.UpdatePassword(userID, string(hashedPassword)); err != nil {
+		return err
+	}
+	if err := s.userRepo.RevokeAllUserRefreshTokens(userID); err != nil {
+		log.Printf("Failed to revoke refresh tokens: %v", err)
+	}
+	go s.emailService.SendPasswordChangedEmail(user)
+	return nil
+}
+
+func (s *AuthService) generatePasswordResetToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
 }

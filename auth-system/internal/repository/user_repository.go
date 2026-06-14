@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
 type UserRepository struct {
 	db *gorm.DB
 }
+
 
 func NewUserRepository() *UserRepository {
 	return &UserRepository{
@@ -90,7 +92,6 @@ func (r *UserRepository) RevokeAllUserRefreshTokens(userID uuid.UUID) error {
 		Update("revoked", true).Error
 }
 
-
 func (r *UserRepository) CreateEmailVerification(verification *models.EmailVerification) error {
 	return r.db.Create(verification).Error
 }
@@ -99,25 +100,23 @@ func (r *UserRepository) FindEmailVerificationByToken(token string) (*models.Ema
 	var verification models.EmailVerification
 	err := r.db.Where("token = ? AND used_at IS NULL", token).First(&verification).Error
 	if err != nil {
-        if errors.Is(err, gorm.ErrRecordNotFound) {
-            return nil, nil
-        }
-        return nil, err
-    }
-    return &verification, nil
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &verification, nil
 }
-
 
 func (r *UserRepository) MarkEmailAsVerified(userID uuid.UUID) error {
-    now := time.Now()
-    return r.db.Model(&models.User{}).
-        Where("id = ?", userID).
-        Updates(map[string]interface{}{
-            "email_verified": true,
-            "verified_at":    now,
-        }).Error
+	now := time.Now()
+	return r.db.Model(&models.User{}).
+		Where("id = ?", userID).
+		Updates(map[string]interface{}{
+			"email_verified": true,
+			"verified_at":    now,
+		}).Error
 }
-
 
 func (r *UserRepository) MarkVerificatioTokenUsed(tokenID uuid.UUID) error {
 	now := time.Now()
@@ -126,4 +125,96 @@ func (r *UserRepository) MarkVerificatioTokenUsed(tokenID uuid.UUID) error {
 
 func (r *UserRepository) DeleteExpiredVerificationTokens() error {
 	return r.db.Where("expires_at < ?", time.Now()).Delete(&models.EmailVerification{}).Error
+}
+
+func (r *UserRepository) CreatePasswordReset(reset *models.PasswordReset) error {
+	return r.db.Create(reset).Error
+}
+
+func (r *UserRepository) FindPasswordResetByToken(token string) (*models.PasswordReset, error) {
+	var reset models.PasswordReset
+	err := r.db.Where("token = ? AND used_at IS NULL", token).First(&reset).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &reset, nil
+}
+
+func (r *UserRepository) MarkPasswordResetUsed(tokenID uuid.UUID) error {
+	now := time.Now()
+	return r.db.Model(&models.PasswordReset{}).
+		Where("id = ?", tokenID).
+		Update("used_at", now).Error
+}
+
+func (r *UserRepository) UpdatePassword(userID uuid.UUID, newPassword string) error {
+	return r.db.Model(&models.User{}).Where("id = ?", userID).Update("password", newPassword).Error
+}
+
+func (r *UserRepository) DeleteExpiredPasswordResets() error {
+	return r.db.Where("expires_at < ?", time.Now()).Delete(&models.PasswordReset{}).Error
+}
+
+func (r *UserRepository) EnableTwoFactor(userID uuid.UUID, secret string) error {
+    return r.db.Model(&models.User{}).
+        Where("id = ?", userID).
+        Updates(map[string]interface{}{
+            "two_factor_enabled": true,
+            "two_factor_secret":  secret,
+        }).Error
+}
+
+func (r *UserRepository) DisableTwoFactor(userID uuid.UUID) error {
+    return r.db.Model(&models.User{}).
+        Where("id = ?", userID).
+        Updates(map[string]interface{}{
+            "two_factor_enabled": false,
+            "two_factor_secret":  nil,
+        }).Error
+}
+
+func (r *UserRepository) VerifyPassword(user *models.User, password string) error {
+    return bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password))
+}
+
+func (r *UserRepository) SaveBackupCodes(userID uuid.UUID, codes []models.BackupCode) error {
+    return r.db.Create(&codes).Error
+}
+
+func (r *UserRepository) FindBackupCode(userID uuid.UUID, code string) (*models.BackupCode, error) {
+    var backupCode models.BackupCode
+    err := r.db.Where("user_id = ? AND code = ? AND used = ?", userID, code, false).
+        First(&backupCode).Error
+    if err != nil {
+        if errors.Is(err, gorm.ErrRecordNotFound) {
+            return nil, nil
+        }
+        return nil, err
+    }
+    return &backupCode, nil
+}
+
+func (r *UserRepository) MarkBackupCodeUsed(id uuid.UUID) error {
+    return r.db.Model(&models.BackupCode{}).
+        Where("id = ?", id).
+        Update("used", true).Error
+}
+
+func (r *UserRepository) DeleteBackupCodes(userID uuid.UUID) error {
+    return r.db.Where("user_id = ?", userID).Delete(&models.BackupCode{}).Error
+}
+
+func (r *UserRepository) GetUserByIDWith2FA(userID uuid.UUID) (*models.User, error) {
+    var user models.User
+    err := r.db.Preload("BackupCodes").First(&user, "id = ?", userID).Error
+    if err != nil {
+        if errors.Is(err, gorm.ErrRecordNotFound) {
+            return nil, nil
+        }
+        return nil, err
+    }
+    return &user, nil
 }

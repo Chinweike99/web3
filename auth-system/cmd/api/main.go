@@ -9,6 +9,7 @@ import (
 	"auth-system/internal/repository"
 	"auth-system/internal/service"
 	"log"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -17,29 +18,40 @@ func main() {
 	config.LoadConfig()
 
 	// database.ConnectDB()
-
 	database.ConnectDB()
 
 	database.DB.AutoMigrate(
 		&models.User{},
 		&models.RefreshToken{},
+		&models.EmailVerification{},
+		&models.PasswordReset{},
 	)
+	log.Println("Running migrations...")
 
 	// initialise repo
 	userRepo := repository.NewUserRepository()
 	emailService := service.NewEmailService(userRepo)
+	rateLimitService := service.NewRateLimitService() 
+	
+	// Clean Expired token
+	startCleanupJob(userRepo)
 	// Initialize services
 	tokenService := service.NewTokenService(userRepo)
-	authService := service.NewAuthService(userRepo, tokenService, emailService)
+	authService := service.NewAuthService(userRepo, tokenService, emailService, rateLimitService)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(authService)
 
 	// Initialse middleware
 	authMiddleware := middlewares.NewAuthMiddleware(tokenService)
+	// rateLimiterMiddleware := middlewares.NewRateLimiterMiddleware()
 
 	// Setup  router
 	router := gin.Default()
+
+	// Add global middlewares
+    router.Use(rateLimitService.RateLimitMiddleware()) 
+	// middlewares.SetupRateLimiting(router, rateLimiterMiddleware)
 
 	// Public routes
 	auth := router.Group("/api/v1/auth")
@@ -47,8 +59,10 @@ func main() {
 		auth.POST("/register", authHandler.Register)
 		auth.POST("/login", authHandler.Login)
 		auth.POST("/refresh", authHandler.RefreshToken)
-		auth.GET("/verify-email", authHandler.VerifyEmail)  // Add this
-    	auth.POST("/resend-verification", authHandler.ResendVerification)  // Add this
+		auth.GET("/verify-email", authHandler.VerifyEmail)
+		auth.POST("/resend-verification", authHandler.ResendVerification)
+		auth.POST("/forgot-password", authHandler.ForgotPassword)
+		auth.POST("/reset-password", authHandler.ResetPassword)
 	}
 
 	// Protected routes
@@ -57,6 +71,7 @@ func main() {
 	{
 		protected.POST("/logout", authHandler.Logout)
 		protected.GET("/profile", authHandler.GetProfile)
+		protected.POST("/chaneg-password", authHandler.ChangePassword)
 
 		// Admin only routes
 		admin := protected.Group("/admin")
@@ -84,3 +99,20 @@ func main() {
 		log.Fatal("Failed to start server:", err)
 	}
 }
+
+func startCleanupJob(repo *repository.UserRepository) {
+	ticker := time.NewTicker(24 * time.Hour)
+	go func() {
+		for range ticker.C {
+			log.Println("Running cleanup job for expired tokens...")
+			if err := repo.DeleteExpiredVerificationTokens(); err != nil {
+				log.Printf("Failed to delete expired verification tokens: %v", err)
+			}
+			if err := repo.DeleteExpiredPasswordResets(); err != nil {
+				log.Printf("Failed to delete expired password resets: %v", err)
+			}
+		}
+	}()
+}
+
+// In main() function after initializing repository:
