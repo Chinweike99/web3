@@ -159,3 +159,103 @@ func (s *EmailService) SendPasswordChangedEmail(user *models.User) error {
 
 	return s.dialer.DialAndSend(m)
 }
+
+func (s *EmailService) SendAccountLockedEmail(user *models.User, lockedUntil time.Time, ip string) error {
+	m := gomail.NewMessage()
+	m.SetHeader("From", config.AppConfig.SMTPFrom)
+	m.SetHeader("To", user.Email)
+	m.SetHeader("Subject", "Account Locked Due to Suspicious Activity")
+
+	duration := time.Until(lockedUntil).Minutes()
+
+	body := fmt.Sprintf(`
+        <html>
+        <body>
+            <h2>Account Security Alert</h2>
+            <p>Hello %s,</p>
+            <p>Your account has been temporarily locked due to multiple failed login attempts.</p>
+            <div style="background: #f8f9fa; padding: 15px; margin: 10px 0;">
+                <p><strong>Details:</strong></p>
+                <p>• IP Address: %s</p>
+                <p>• Locked Until: %s</p>
+                <p>• Duration: %.0f minutes</p>
+            </div>
+            <p>If this wasn't you, please:</p>
+            <ul>
+                <li>Reset your password immediately</li>
+                <li>Contact our support team</li>
+                <li>Review your account activity</li>
+            </ul>
+            <p>After the lockout period ends, you can try logging in again.</p>
+            <hr>
+            <p><a href="%s/reset-password">Reset Your Password</a></p>
+        </body>
+        </html>
+    `, user.FirstName, ip, lockedUntil.Format("2006-01-02 15:04:05"), duration, config.AppConfig.AppURL)
+
+	m.SetBody("text/html", body)
+
+	return s.dialer.DialAndSend(m)
+}
+
+func (s *EmailService) SendAccountUnlockedEmail(user *models.User) error {
+	m := gomail.NewMessage()
+	m.SetHeader("From", config.AppConfig.SMTPFrom)
+	m.SetHeader("To", user.Email)
+	m.SetHeader("Subject", "Your Account Has Been Unlocked")
+
+	body := fmt.Sprintf(`
+        <html>
+        <body>
+            <h2>Account Unlocked</h2>
+            <p>Hello %s,</p>
+            <p>Your account has been unlocked. You can now log in again.</p>
+            <p>For security reasons, we recommend:</p>
+            <ul>
+                <li>Using a strong, unique password</li>
+                <li>Enabling two-factor authentication</li>
+                <li>Never sharing your credentials</li>
+            </ul>
+            <p><a href="%s/login">Log in to your account</a></p>
+        </body>
+        </html>
+    `, user.FirstName, config.AppConfig.AppURL)
+
+	m.SetBody("text/html", body)
+
+	return s.dialer.DialAndSend(m)
+}
+
+func (s *EmailService) SendSuspiciousActivityAlert(user *models.User, ip string, attempts int) error {
+	m := gomail.NewMessage()
+	m.SetHeader("From", config.AppConfig.SMTPFrom)
+	m.SetHeader("To", user.Email)
+	m.SetHeader("Subject", "⚠️ Suspicious Activity Detected on Your Account")
+
+	body := fmt.Sprintf(`
+        <html>
+        <body>
+            <h2>Suspicious Activity Alert</h2>
+            <p>Hello %s,</p>
+            <p>We've detected unusual activity on your account:</p>
+            <div style="background: #fff3cd; padding: 15px; margin: 10px 0; border-left: 4px solid #ffc107;">
+                <p><strong>Details:</strong></p>
+                <p>• %d failed login attempts</p>
+                <p>• From IP: %s</p>
+                <p>• Time: %s</p>
+            </div>
+            <p><strong>Recommended actions:</strong></p>
+            <ol>
+                <li>Change your password immediately</li>
+                <li>Enable two-factor authentication</li>
+                <li>Review your recent account activity</li>
+            </ol>
+            <p><a href="%s/security">Secure your account now</a></p>
+        </body>
+        </html>
+    `, user.FirstName, attempts, ip, time.Now().Format("2006-01-02 15:04:05"), config.AppConfig.AppURL)
+
+	m.SetBody("text/html", body)
+
+	return s.dialer.DialAndSend(m)
+}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/ulule/limiter/v3"
 )
 
 func main() {
@@ -25,33 +26,43 @@ func main() {
 		&models.RefreshToken{},
 		&models.EmailVerification{},
 		&models.PasswordReset{},
+		&models.BackupCode{},
 	)
 	log.Println("Running migrations...")
 
 	// initialise repo
 	userRepo := repository.NewUserRepository()
 	emailService := service.NewEmailService(userRepo)
-	rateLimitService := service.NewRateLimitService() 
-	
+	rateLimitService := service.NewRateLimitService()
+
 	// Clean Expired token
 	startCleanupJob(userRepo)
+
+	// Initialize 2FA service
+	twoFactorService := service.NewTwoFactorService(userRepo)
+
 	// Initialize services
 	tokenService := service.NewTokenService(userRepo)
-	authService := service.NewAuthService(userRepo, tokenService, emailService, rateLimitService)
+	authService := service.NewAuthService(userRepo, tokenService, emailService, rateLimitService, twoFactorService)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(authService)
 
 	// Initialse middleware
 	authMiddleware := middlewares.NewAuthMiddleware(tokenService)
-	// rateLimiterMiddleware := middlewares.NewRateLimiterMiddleware()
+	rateLimiterMiddleware := middlewares.NewRateLimiterMiddleware()
 
 	// Setup  router
 	router := gin.Default()
 
 	// Add global middlewares
-    router.Use(rateLimitService.RateLimitMiddleware()) 
+	router.Use(rateLimitService.RateLimitMiddleware())
 	// middlewares.SetupRateLimiting(router, rateLimiterMiddleware)
+
+	// Initialize 2FA handler
+	twoFactorHandler := handlers.NewTwoFactorHandler(twoFactorService, authService)
+	lockoutHandler := handlers.NewLockoutHandler(authService)
+
 
 	// Public routes
 	auth := router.Group("/api/v1/auth")
@@ -68,10 +79,25 @@ func main() {
 	// Protected routes
 	protected := router.Group("/api/v1")
 	protected.Use(authMiddleware.Authenticate())
+	protected.Use(rateLimiterMiddleware.RateLimitByUserID(limiter.Rate{
+		Period: 1 * time.Minute,
+		Limit:  30,
+	}))
 	{
 		protected.POST("/logout", authHandler.Logout)
 		protected.GET("/profile", authHandler.GetProfile)
-		protected.POST("/chaneg-password", authHandler.ChangePassword)
+		protected.POST("/change-password", authHandler.ChangePassword)
+		protected.GET("/lock-history", lockoutHandler.GetAccountLockHistory)
+
+		// 2FA routes
+		twofa := protected.Group("/2fa")
+		{
+			twofa.POST("/setup", twoFactorHandler.Setup2FA)
+			twofa.POST("/enable", twoFactorHandler.Enable2FA)
+			twofa.POST("/disable", twoFactorHandler.Disable2FA)
+			twofa.GET("/status", twoFactorHandler.Get2FAStatus)
+			twofa.POST("/regenerate-backup-codes", twoFactorHandler.RegenerateBackupCodes)
+		}
 
 		// Admin only routes
 		admin := protected.Group("/admin")
@@ -89,9 +115,16 @@ func main() {
 			mod.GET("/reports", func(c *gin.Context) {
 				c.JSON(200, gin.H{"message": "Reports access granted"})
 			})
+
+			// Lockout admin routes
+			admin.GET("/locked-accounts", lockoutHandler.GetLockedAccounts)
+			admin.POST("/unlock-account", lockoutHandler.AdminUnlockAccount)
 		}
 
 	}
+	// Public 2FA login route
+	router.POST("/api/v1/auth/verify-2fa", twoFactorHandler.Verify2FALogin)
+	router.POST("/api/v1/auth/unlock-account", lockoutHandler.UnlockAccount)
 
 	// Start server
 	log.Printf("Server starting on port %s", config.AppConfig.ServerPort)

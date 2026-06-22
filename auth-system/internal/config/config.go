@@ -30,13 +30,18 @@ type Config struct {
 	AppURL       string
 
 	// Rate Limiting Settings
-	// Rate Limiting Settings
 	RateLimitEnabled        bool
 	RateLimitPerMinute      int
 	RateLimitPerHour        int
 	RateLimitPerDay         int
 	RateLimitLoginPerMin    int
 	RateLimitRegisterPerMin int
+
+	// Account Lockout Settings
+	MaxLoginAttempts       int
+	LockoutDurationMinutes int
+	ResetAttemptsMinutes   int
+	NotifyOnLockout        bool
 }
 
 var AppConfig *Config
@@ -73,6 +78,10 @@ func LoadConfig() {
 		RateLimitPerDay:         getEnvAsInt("RATE_LIMIT_PER_DAY", 5000),
 		RateLimitLoginPerMin:    getEnvAsInt("RATE_LIMIT_LOGIN_PER_MIN", 5),
 		RateLimitRegisterPerMin: getEnvAsInt("RATE_LIMIT_REGISTER_PER_MIN", 3),
+		MaxLoginAttempts:        getEnvAsInt("MAX_LOGIN_ATTEMPTS", 5),
+		LockoutDurationMinutes:  getEnvAsInt("LOCKOUT_DURATION_MINUTES", 30),
+		ResetAttemptsMinutes:    getEnvAsInt("RESET_ATTEMPTS_MINUTES", 15),
+		NotifyOnLockout:         getEnvAsBool("NOTIFY_ON_LOCKOUT", true),
 	}
 }
 

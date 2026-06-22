@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"auth-system/internal/config"
 	"auth-system/internal/database"
 	"auth-system/internal/models"
 	"errors"
@@ -14,7 +15,6 @@ import (
 type UserRepository struct {
 	db *gorm.DB
 }
-
 
 func NewUserRepository() *UserRepository {
 	return &UserRepository{
@@ -159,62 +159,156 @@ func (r *UserRepository) DeleteExpiredPasswordResets() error {
 }
 
 func (r *UserRepository) EnableTwoFactor(userID uuid.UUID, secret string) error {
-    return r.db.Model(&models.User{}).
-        Where("id = ?", userID).
-        Updates(map[string]interface{}{
-            "two_factor_enabled": true,
-            "two_factor_secret":  secret,
-        }).Error
+	return r.db.Model(&models.User{}).
+		Where("id = ?", userID).
+		Updates(map[string]interface{}{
+			"two_factor_enabled": true,
+			"two_factor_secret":  secret,
+		}).Error
 }
 
 func (r *UserRepository) DisableTwoFactor(userID uuid.UUID) error {
-    return r.db.Model(&models.User{}).
-        Where("id = ?", userID).
-        Updates(map[string]interface{}{
-            "two_factor_enabled": false,
-            "two_factor_secret":  nil,
-        }).Error
+	return r.db.Model(&models.User{}).
+		Where("id = ?", userID).
+		Updates(map[string]interface{}{
+			"two_factor_enabled": false,
+			"two_factor_secret":  nil,
+		}).Error
 }
 
 func (r *UserRepository) VerifyPassword(user *models.User, password string) error {
-    return bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password))
+	return bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password))
 }
 
 func (r *UserRepository) SaveBackupCodes(userID uuid.UUID, codes []models.BackupCode) error {
-    return r.db.Create(&codes).Error
+	return r.db.Create(&codes).Error
 }
 
 func (r *UserRepository) FindBackupCode(userID uuid.UUID, code string) (*models.BackupCode, error) {
-    var backupCode models.BackupCode
-    err := r.db.Where("user_id = ? AND code = ? AND used = ?", userID, code, false).
-        First(&backupCode).Error
-    if err != nil {
-        if errors.Is(err, gorm.ErrRecordNotFound) {
-            return nil, nil
-        }
-        return nil, err
-    }
-    return &backupCode, nil
+	var backupCode models.BackupCode
+	err := r.db.Where("user_id = ? AND code = ? AND used = ?", userID, code, false).
+		First(&backupCode).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &backupCode, nil
 }
 
 func (r *UserRepository) MarkBackupCodeUsed(id uuid.UUID) error {
-    return r.db.Model(&models.BackupCode{}).
-        Where("id = ?", id).
-        Update("used", true).Error
+	return r.db.Model(&models.BackupCode{}).
+		Where("id = ?", id).
+		Update("used", true).Error
 }
 
 func (r *UserRepository) DeleteBackupCodes(userID uuid.UUID) error {
-    return r.db.Where("user_id = ?", userID).Delete(&models.BackupCode{}).Error
+	return r.db.Where("user_id = ?", userID).Delete(&models.BackupCode{}).Error
 }
 
 func (r *UserRepository) GetUserByIDWith2FA(userID uuid.UUID) (*models.User, error) {
-    var user models.User
-    err := r.db.Preload("BackupCodes").First(&user, "id = ?", userID).Error
-    if err != nil {
-        if errors.Is(err, gorm.ErrRecordNotFound) {
-            return nil, nil
-        }
-        return nil, err
-    }
-    return &user, nil
+	var user models.User
+	err := r.db.Preload("BackupCodes").First(&user, "id = ?", userID).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (r *UserRepository) IsAccountLocked(userID uuid.UUID) (bool, *time.Time, error) {
+	var user models.User
+	err := r.db.Select("locked_until").First(&user, "id = ?", userID).Error
+	if err != nil {
+		return false, nil, err
+	}
+
+	if user.LockedUntil != nil && user.LockedUntil.After(time.Now()) {
+		return true, user.LockedUntil, nil
+	}
+
+	return false, nil, nil
+}
+
+func (r *UserRepository) ResetLoginAttempts(userID uuid.UUID) error {
+	return r.db.Model(&models.User{}).
+		Where("id = ?", userID).
+		Updates(map[string]interface{}{
+			"login_attempts": 0,
+			"locked_until":   nil,
+		}).Error
+}
+
+func (r *UserRepository) CreateAccountLock(lock *models.AccountLock) error {
+	return r.db.Create(lock).Error
+}
+
+func (r *UserRepository) UnlockAccount(userID uuid.UUID) error {
+	return r.db.Model(&models.User{}).
+		Where("id = ?", userID).
+		Updates(map[string]interface{}{
+			"login_attempts": 0,
+			"locked_until":   nil,
+		}).Error
+}
+
+func (r *UserRepository) GetAccountLocks(userID uuid.UUID, limit int) ([]models.AccountLock, error) {
+	var locks []models.AccountLock
+	err := r.db.Where("user_id = ?", userID).
+		Order("created_at DESC").
+		Limit(limit).
+		Find(&locks).Error
+	return locks, err
+}
+
+func (r *UserRepository) GetLockedAccounts() ([]models.User, error) {
+	var users []models.User
+	err := r.db.Where("locked_until > ?", time.Now()).
+		Find(&users).Error
+	return users, err
+}
+
+func (r *UserRepository) RecordLoginAttempt(userID uuid.UUID, success bool, ip string) error {
+	user, err := r.FindByID(userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return nil
+	}
+
+	now := time.Now()
+
+	if success {
+		// Reset attempts on successful login
+		return r.db.Model(&models.User{}).
+			Where("id = ?", userID).
+			Updates(map[string]interface{}{
+				"login_attempts": 0,
+				"locked_until":   nil,
+				"last_login_at":  now,
+				"last_login_ip":  ip,
+			}).Error
+	}
+
+	// Increment failed attempts
+	newAttempts := user.LoginAttempts + 1
+
+	updateData := map[string]interface{}{
+		"login_attempts":         newAttempts,
+		"last_failed_attempt_at": now,
+	}
+
+	// Lock account if max attempts reached
+	if newAttempts >= config.AppConfig.MaxLoginAttempts {
+		lockedUntil := now.Add(time.Duration(config.AppConfig.LockoutDurationMinutes) * time.Minute)
+		updateData["locked_until"] = lockedUntil
+	}
+
+	return r.db.Model(&models.User{}).
+		Where("id = ?", userID).
+		Updates(updateData).Error
 }

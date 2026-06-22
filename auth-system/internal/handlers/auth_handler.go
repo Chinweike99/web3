@@ -4,6 +4,7 @@ import (
 	"auth-system/internal/models"
 	"auth-system/internal/service"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -53,6 +54,36 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	ip := c.ClientIP()
 	user, tokenResponse, err := h.authService.Login(&req, ip)
 	if err != nil {
+		// Check if 2FA is required
+		if err.Error() == "2FA_REQUIRED" {
+			c.JSON(http.StatusOK, gin.H{
+				"message":             "2FA verification required",
+				"two_factor_required": true,
+				"email":               req.Email,
+			})
+			return
+		}
+
+		// Check for specific error types
+		errMsg := err.Error()
+
+		if errMsg == "2FA_REQUIRED" {
+			c.JSON(http.StatusOK, gin.H{
+				"message":             "2FA verification required",
+				"two_factor_required": true,
+				"email":               req.Email,
+			})
+			return
+		}
+
+		if strings.Contains(errMsg, "account is locked") {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":          errMsg,
+				"account_locked": true,
+			})
+			return
+		}
+
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}

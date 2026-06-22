@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -15,27 +16,34 @@ import (
 )
 
 type AuthService struct {
-	userRepo     *repository.UserRepository
-	tokenService *TokenService
-	emailService *EmailService
+	userRepo         *repository.UserRepository
+	tokenService     *TokenService
+	emailService     *EmailService
 	rateLimitService *RateLimitService
+	twoFactorService *TwoFactorService
 }
 
-func NewAuthService(userRepo *repository.UserRepository, tokenService *TokenService, emailService *EmailService,  rateLimitService *RateLimitService,) *AuthService {
+func NewAuthService(userRepo *repository.UserRepository,
+	tokenService *TokenService,
+	emailService *EmailService,
+	rateLimitService *RateLimitService,
+	twoFactorService *TwoFactorService,
+) *AuthService {
 	return &AuthService{
-		userRepo:     userRepo,
-		tokenService: tokenService,
-		emailService: emailService,
+		userRepo:         userRepo,
+		tokenService:     tokenService,
+		emailService:     emailService,
 		rateLimitService: rateLimitService,
+		twoFactorService: twoFactorService,
 	}
 }
 
 func (s *AuthService) Register(req *models.RegisterRequest, ip string) (*models.User, error) {
 	// Track registration attempt
-    defer func() {
-        s.rateLimitService.RecordAttempt(ip, req.Email, true)
-    }()
-	
+	defer func() {
+		s.rateLimitService.RecordAttempt(ip, req.Email, true)
+	}()
+
 	existingUser, err := s.userRepo.FindByEmail(req.Email)
 	if err != nil {
 		return nil, err
@@ -71,13 +79,13 @@ func (s *AuthService) Register(req *models.RegisterRequest, ip string) (*models.
 }
 
 func (s *AuthService) Login(req *models.LoginRequest, ip string) (*models.User, *models.TokenResponse, error) {
-	
+
 	// Track attempt
-    success := false
-    defer func() {
-        s.rateLimitService.RecordAttempt(ip, req.Email, success)
-    }()
-	
+	success := false
+	defer func() {
+		s.rateLimitService.RecordAttempt(ip, req.Email, success)
+	}()
+
 	user, err := s.userRepo.FindByEmail(req.Email)
 	if err != nil {
 		return nil, nil, err
@@ -89,16 +97,56 @@ func (s *AuthService) Login(req *models.LoginRequest, ip string) (*models.User, 
 		return nil, nil, errors.New("Account is inactive")
 	}
 
+	// Check if account is locked
+	isLocked, lockedUntil, err := s.userRepo.IsAccountLocked(user.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if isLocked {
+		remainingMinutes := int(time.Until(*lockedUntil).Minutes())
+		return nil, nil, fmt.Errorf("account is locked. Please try again in %d minutes", remainingMinutes)
+	}
+
 	if !user.EmailVerified {
 		return nil, nil, errors.New("please verify your email address before logging in")
 	}
 
 	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password))
 	if err != nil {
-		return nil, nil, errors.New("Invalid password")
+		// Record failed attempt
+		s.userRepo.RecordLoginAttempt(user.ID, false, ip)
+		newAttempts := user.LoginAttempts + 1
+
+		if newAttempts >= config.AppConfig.MaxLoginAttempts-2 && config.AppConfig.NotifyOnLockout {
+			go s.emailService.SendSuspiciousActivityAlert(user, ip, newAttempts)
+		}
+		// Send lockout notification if account is now locked
+		if newAttempts >= config.AppConfig.MaxLoginAttempts {
+			if config.AppConfig.NotifyOnLockout {
+				lockedUntil := time.Now().Add(time.Duration(config.AppConfig.LockoutDurationMinutes) * time.Minute)
+				go s.emailService.SendAccountLockedEmail(user, lockedUntil, ip)
+			}
+
+			// Log the lock event
+			lock := &models.AccountLock{
+				UserID:       user.ID,
+				IPAddress:    ip,
+				AttemptCount: newAttempts,
+				LockedAt:     time.Now(),
+			}
+			s.userRepo.CreateAccountLock(lock)
+		}
+		return nil, nil, errors.New("Invalid credentials")
 	}
 
 	success = true
+	// Record successful login
+	s.userRepo.RecordLoginAttempt(user.ID, true, ip)
+
+	// Check if 2FA is enabled
+	if user.TwoFactorEnabled {
+		return user, nil, errors.New("2FA_REQUIRED")
+	}
 
 	// Generate tokens
 	accessToken, err := s.tokenService.GenerateAccessToken(user)
@@ -301,4 +349,123 @@ func (s *AuthService) generatePasswordResetToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(bytes), nil
+}
+
+func (s *AuthService) VerifyTwoFactorLogin(req *models.TwoFactorLoginRequest, ip string) (*models.User, *models.TokenResponse, error) {
+	user, err := s.userRepo.FindByEmail(req.Email)
+	if err != nil {
+		return nil, nil, err
+	}
+	if user == nil {
+		return nil, nil, errors.New("Invalid credentials")
+	}
+
+	// Verify password
+	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password))
+	if err != nil {
+		s.rateLimitService.RecordAttempt(ip, req.Email, false)
+		return nil, nil, errors.New("invalid credentials")
+	}
+
+	valid := s.twoFactorService.VerifyTwoFactorCode(user.TwoFactorSecret, req.Token)
+	if !valid {
+		// Check if it's a backup code
+		backupValid, err := s.twoFactorService.VerifyBackupCode(user.ID, req.Token)
+		if err != nil || !backupValid {
+			s.rateLimitService.RecordAttempt(ip, req.Email, false)
+			return nil, nil, errors.New("invalid 2FA code")
+		}
+	}
+	s.rateLimitService.RecordAttempt(ip, req.Email, true)
+
+	// Generate tokens
+	accessToken, err := s.tokenService.GenerateAccessToken(user)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	refreshToken, _, err := s.tokenService.GenerateRefreshToken(user.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	tokenResponse := &models.TokenResponse{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		TokenType:    "Bearer",
+		ExpiresIn:    config.AppConfig.JwtAccessExpiration * 60,
+	}
+	return user, tokenResponse, nil
+}
+
+func (s *AuthService) GetUserByID(userID uuid.UUID) (*models.User, error) {
+	return s.userRepo.FindByID(userID)
+}
+
+func (s *AuthService) VerifyUserPassword(user *models.User, password string) error {
+	return s.userRepo.VerifyPassword(user, password)
+}
+
+// UnlockAccount manually unlocks a locked account
+func (s *AuthService) UnlockAccount(email string) error {
+	user, err := s.userRepo.FindByEmail(email)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return errors.New("user not found")
+	}
+
+	// Check if account is actually locked
+	isLocked, _, err := s.userRepo.IsAccountLocked(user.ID)
+	if err != nil {
+		return err
+	}
+	if !isLocked {
+		return errors.New("account is not locked")
+	}
+
+	// Unlock account
+	if err := s.userRepo.UnlockAccount(user.ID); err != nil {
+		return err
+	}
+
+	// Send unlock notification
+	if config.AppConfig.NotifyOnLockout {
+		go s.emailService.SendAccountUnlockedEmail(user)
+	}
+
+	return nil
+}
+
+// AdminUnlockAccount unlocks an account by admin
+func (s *AuthService) AdminUnlockAccount(userID uuid.UUID) error {
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return errors.New("user not found")
+	}
+
+	if err := s.userRepo.UnlockAccount(user.ID); err != nil {
+		return err
+	}
+
+	// Send notification
+	if config.AppConfig.NotifyOnLockout {
+		go s.emailService.SendAccountUnlockedEmail(user)
+	}
+
+	return nil
+}
+
+// GetLockedAccounts returns all currently locked accounts
+func (s *AuthService) GetLockedAccounts() ([]models.User, error) {
+	return s.userRepo.GetLockedAccounts()
+}
+
+// GetAccountLockHistory returns lock history for a user
+func (s *AuthService) GetAccountLockHistory(userID uuid.UUID) ([]models.AccountLock, error) {
+	return s.userRepo.GetAccountLocks(userID, 10)
 }

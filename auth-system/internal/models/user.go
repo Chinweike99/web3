@@ -29,17 +29,22 @@ type User struct {
 	EmailVerified bool           `gorm:"default:false" json:"email_verified"`
 	VerifiedAt    *time.Time     `json:"verified_at,omitempty"`
 	// VerificationToken string         `gorm:"uniqueIndex" json:"_"`
-	TwoFactorEnabled bool   `gorm:"default:false" json:"two_factor_enabled"`
-    TwoFactorSecret  string `gorm:"type:varchar(255)" json:"-"`
-    BackupCodes      []BackupCode `gorm:"foreignKey:UserID" json:"-"`
+	TwoFactorEnabled    bool         `gorm:"default:false" json:"two_factor_enabled"`
+	TwoFactorSecret     string       `gorm:"type:varchar(255)" json:"-"`
+	BackupCodes         []BackupCode `gorm:"foreignKey:UserID" json:"-"`
+	LoginAttempts       int          `gorm:"default:0" json:"-"`
+	LockedUntil         *time.Time   `json:"locked_until,omitempty"`
+	LastLoginAt         *time.Time   `json:"last_login_at,omitempty"`
+	LastLoginIP         string       `json:"last_login_ip,omitempty"`
+	LastFailedAttemptAt *time.Time   `json:"-"`
 }
 
 type BackupCode struct {
-    ID        uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
-    UserID    uuid.UUID `gorm:"type:uuid;not null" json:"user_id"`
-    Code      string    `gorm:"uniqueIndex;not null" json:"code"`
-    Used      bool      `gorm:"default:false" json:"used"`
-    CreatedAt time.Time `json:"created_at"`
+	ID        uuid.UUID `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	UserID    uuid.UUID `gorm:"type:uuid;not null" json:"user_id"`
+	Code      string    `gorm:"uniqueIndex;not null" json:"code"`
+	Used      bool      `gorm:"default:false" json:"used"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // // Error implements [error].
@@ -113,24 +118,42 @@ type ChangePasswordRequest struct {
 }
 
 type TwoFactorSetupRequest struct {
-    Password string `json:"password" binding:"required"`
+	Password string `json:"password" binding:"required"`
 }
 
 type TwoFactorVerifyRequest struct {
-    Token string `json:"token" binding:"required"`
+	Token string `json:"token" binding:"required"`
 }
 
 type TwoFactorLoginRequest struct {
-    Email    string `json:"email" binding:"required,email"`
-    Password string `json:"password" binding:"required"`
-    Token    string `json:"token" binding:"required"`
+	Email    string `json:"email" binding:"required,email"`
+	Password string `json:"password" binding:"required"`
+	Token    string `json:"token" binding:"required"`
 }
 
 type BackupCodeRequest struct {
-    Code string `json:"code" binding:"required"`
+	Code string `json:"code" binding:"required"`
 }
 
 type TwoFactorDisableRequest struct {
-    Password string `json:"password" binding:"required"`
-    Token    string `json:"token" binding:"required"`
+	Password string `json:"password" binding:"required"`
+	Token    string `json:"token" binding:"required"`
+}
+
+type AccountLock struct {
+	ID           uuid.UUID  `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	UserID       uuid.UUID  `gorm:"type:uuid;not null" json:"user_id"`
+	IPAddress    string     `gorm:"not null" json:"ip_address"`
+	AttemptCount int        `gorm:"default:1" json:"attempt_count"`
+	LockedAt     time.Time  `json:"locked_at"`
+	UnlockedAt   *time.Time `json:"unlocked_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+}
+
+type UnlockAccountRequest struct {
+	Email string `json:"email" binding:"required,email"`
+}
+
+type AdminUnlockRequest struct {
+	UserID string `json:"user_id" binding:"required"`
 }
